@@ -35,6 +35,7 @@ func (group *Group) GetUUIDs() []string {
 
 // NewChain creates a new chain of tasks to be processed one by one, passing
 // results unless task signatures are set to be immutable
+// 把后面的任务链到前面任务的 OnSuccess 上
 func NewChain(signatures ...*Signature) (*Chain, error) {
 	// Auto generate task UUIDs if needed
 	for _, signature := range signatures {
@@ -56,6 +57,7 @@ func NewChain(signatures ...*Signature) (*Chain, error) {
 }
 
 // NewGroup creates a new group of tasks to be processed in parallel
+// 给各个signature 添加GroupUUID
 func NewGroup(signatures ...*Signature) (*Group, error) {
 	// Generate a group UUID
 	groupUUID := uuid.New().String()

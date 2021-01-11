@@ -16,6 +16,7 @@ type TaskResult struct {
 func ReflectTaskResults(taskResults []*TaskResult) ([]reflect.Value, error) {
 	resultValues := make([]reflect.Value, len(taskResults))
 	for i, taskResult := range taskResults {
+		// 根据类型和值创建reflect.Value对象
 		resultValue, err := ReflectValue(taskResult.Type, taskResult.Value)
 		if err != nil {
 			return nil, err
@@ -33,6 +34,7 @@ func HumanReadableResults(results []reflect.Value) string {
 
 	readableResults := make([]string, len(results))
 	for i := 0; i < len(results); i++ {
+		//results[i]是reflect.Value类型
 		readableResults[i] = fmt.Sprintf("%v", results[i].Interface())
 	}
 

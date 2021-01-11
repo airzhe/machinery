@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/opentracing/opentracing-go"
-	
+
 	"github.com/RichardKnop/machinery/v1/backends/amqp"
 	"github.com/RichardKnop/machinery/v1/brokers/errs"
 	"github.com/RichardKnop/machinery/v1/log"
@@ -33,7 +33,7 @@ type Worker struct {
 }
 
 var (
-	// ErrWorkerQuitGracefully is return when worker quit gracefully
+	// ErrWorkerQuitGracefully is return when worker quit gracefully Worker 优雅的退出
 	ErrWorkerQuitGracefully = errors.New("Worker quit gracefully")
 	// ErrWorkerQuitGracefully is return when worker quit abruptly
 	ErrWorkerQuitAbruptly = errors.New("Worker quit abruptly")
@@ -44,13 +44,16 @@ var (
 func (worker *Worker) Launch() error {
 	errorsChan := make(chan error)
 
+	// 异步执行
 	worker.LaunchAsync(errorsChan)
 
+	// 阻塞
 	return <-errorsChan
 }
 
 // LaunchAsync is a non blocking version of Launch
 func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
+	//日志输出相关配置
 	cnf := worker.server.GetConfig()
 	broker := worker.server.GetBroker()
 
@@ -63,6 +66,7 @@ func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
 		log.INFO.Printf("- CustomQueue: %s", worker.Queue)
 	}
 	log.INFO.Printf("- ResultBackend: %s", RedactURL(cnf.ResultBackend))
+	//如果配置了rabbitmq
 	if cnf.AMQP != nil {
 		log.INFO.Printf("- AMQP: %s", cnf.AMQP.Exchange)
 		log.INFO.Printf("  - Exchange: %s", cnf.AMQP.Exchange)
@@ -73,6 +77,7 @@ func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
 
 	var signalWG sync.WaitGroup
 	// Goroutine to start broker consumption and handle retries when broker connection dies
+	// 开启for循环，如果返回retry会重试（如复用之前的连接不可用），否则致命错误退出
 	go func() {
 		for {
 			retry, err := broker.StartConsuming(worker.ConsumerTag, worker.Concurrency, worker)
@@ -84,6 +89,7 @@ func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
 					log.WARNING.Printf("Broker failed with error: %s", err)
 				}
 			} else {
+				// 此时信号量值为0，直接退出?
 				signalWG.Wait()
 				errorsChan <- err // stop the goroutine
 				return
@@ -91,6 +97,7 @@ func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
 		}
 	}()
 	if !cnf.NoUnixSignals {
+		// 避免反复信号被忽略，如果sig没有缓冲区，多个信号只能接收一，使用Select实现无阻塞读写
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 		var signalsReceived uint
@@ -103,15 +110,19 @@ func (worker *Worker) LaunchAsync(errorsChan chan<- error) {
 
 				if signalsReceived < 2 {
 					// After first Ctrl+C start quitting the worker gracefully
+					// 用户第一次 Ctrl+c 开启优雅退出
 					log.WARNING.Print("Waiting for running tasks to finish before shutting down")
+					// 不明白这里为什么用signalWG
 					signalWG.Add(1)
 					go func() {
+						//worker.server.GetBroker().StopConsuming()
 						worker.Quit()
 						errorsChan <- ErrWorkerQuitGracefully
 						signalWG.Done()
 					}()
 				} else {
 					// Abort the program when user hits Ctrl+C second time in a row
+					// 连续两次则立即退出
 					errorsChan <- ErrWorkerQuitAbruptly
 				}
 			}
@@ -133,21 +144,25 @@ func (worker *Worker) Quit() {
 func (worker *Worker) Process(signature *tasks.Signature) error {
 	// If the task is not registered with this worker, do not continue
 	// but only return nil as we do not want to restart the worker process
+	// 如果task 没有注册过，直接返回nil
 	if !worker.server.IsTaskRegistered(signature.Name) {
 		return nil
 	}
 
+	// 根据signature名称，获取taskFunc
 	taskFunc, err := worker.server.GetRegisteredTask(signature.Name)
 	if err != nil {
 		return nil
 	}
 
 	// Update task state to RECEIVED
+	// 在Backend 更新task状态
 	if err = worker.server.GetBackend().SetStateReceived(signature); err != nil {
 		return fmt.Errorf("Set state to 'received' for task %s returned error: %s", signature.UUID, err)
 	}
 
 	// Prepare task for processing
+	// 根据 taskFunc 和签名，反射得到task对象
 	task, err := tasks.NewWithSignature(taskFunc, signature)
 	// if this failed, it means the task is malformed, probably has invalid
 	// signature, go directly to task failed without checking whether to retry
@@ -164,32 +179,40 @@ func (worker *Worker) Process(signature *tasks.Signature) error {
 	task.Context = opentracing.ContextWithSpan(task.Context, taskSpan)
 
 	// Update task state to STARTED
+	// 如果 backend 为 null，执行 SetStateStarted 什么都不会做，参考v1/backends/null.go
 	if err = worker.server.GetBackend().SetStateStarted(signature); err != nil {
 		return fmt.Errorf("Set state to 'started' for task %s returned error: %s", signature.UUID, err)
 	}
 
 	//Run handler before the task is called
+	//执行预处理函数
 	if worker.preTaskHandler != nil {
 		worker.preTaskHandler(signature)
 	}
 
 	//Defer run handler for the end of the task
+	//通过defer执行后置函数
 	if worker.postTaskHandler != nil {
 		defer worker.postTaskHandler(signature)
 	}
 
 	// Call the task
+	// 通过反射执行task
+	// error 不为空存在两种情况: 反射执行panic，比如缺少参数，task 最后一个参数是一个 non-nil error
 	results, err := task.Call()
 	if err != nil {
 		// If a tasks.ErrRetryTaskLater was returned from the task,
 		// retry the task after specified duration
+		// 如果返回了 ErrRetryTaskLater 错误，重试
 		retriableErr, ok := interface{}(err).(tasks.ErrRetryTaskLater)
 		if ok {
+			//
 			return worker.retryTaskIn(signature, retriableErr.RetryIn())
 		}
 
 		// Otherwise, execute default retry logic based on signature.RetryCount
 		// and signature.RetryTimeout values
+		// 如果重试次数大于 0,执行taskRetry
 		if signature.RetryCount > 0 {
 			return worker.taskRetry(signature)
 		}
@@ -201,6 +224,7 @@ func (worker *Worker) Process(signature *tasks.Signature) error {
 }
 
 // retryTask decrements RetryCount counter and republishes the task to the queue
+// 根据RetryCount 和 RetryTimeout 进行重试，每次重试后 RetryCount--
 func (worker *Worker) taskRetry(signature *tasks.Signature) error {
 	// Update task state to RETRY
 	if err := worker.server.GetBackend().SetStateRetry(signature); err != nil {
@@ -211,6 +235,7 @@ func (worker *Worker) taskRetry(signature *tasks.Signature) error {
 	signature.RetryCount--
 
 	// Increase retry timeout
+	// 每次重试时间比之前时间成斐波纳契式递增
 	signature.RetryTimeout = retry.FibonacciNext(signature.RetryTimeout)
 
 	// Delay task by signature.RetryTimeout seconds
@@ -225,6 +250,7 @@ func (worker *Worker) taskRetry(signature *tasks.Signature) error {
 }
 
 // taskRetryIn republishes the task to the queue with ETA of now + retryIn.Seconds()
+// 延迟retryIn时间后，重新加入队列,会不断重试， 这个任务的停止交给用户控制？
 func (worker *Worker) retryTaskIn(signature *tasks.Signature, retryIn time.Duration) error {
 	// Update task state to RETRY
 	if err := worker.server.GetBackend().SetStateRetry(signature); err != nil {
@@ -244,13 +270,21 @@ func (worker *Worker) retryTaskIn(signature *tasks.Signature, retryIn time.Durat
 
 // taskSucceeded updates the task state and triggers success callbacks or a
 // chord callback if this was the last task of a group with a chord callback
+/*
+type TaskResult struct {
+  Type  string      `bson:"type"`  //reflect.TypeOf(val).String()
+  Value interface{} `bson:"value"` //reflect.ValueOf(val).Interface()
+}
+*/
 func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*tasks.TaskResult) error {
 	// Update task state to SUCCESS
+	// 更新状态，并把结果写入 TaskState 结构体
 	if err := worker.server.GetBackend().SetStateSuccess(signature, taskResults); err != nil {
 		return fmt.Errorf("Set state to 'success' for task %s returned error: %s", signature.UUID, err)
 	}
 
 	// Log human readable results of the processed task
+	// 把结果写入日志
 	var debugResults = "[]"
 	results, err := tasks.ReflectTaskResults(taskResults)
 	if err != nil {
@@ -261,8 +295,9 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 	log.DEBUG.Printf("Processed task %s. Results = %s", signature.UUID, debugResults)
 
 	// Trigger success callbacks
-
+	// 触发成功回调
 	for _, successTask := range signature.OnSuccess {
+		// 把当前结果追加到 successTask.Args 里，chain模式下可能用到，前一个任务的结果当作后一个任务的参数
 		if signature.Immutable == false {
 			// Pass results of the task to success callbacks
 			for _, taskResult := range taskResults {
@@ -281,12 +316,14 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 		return nil
 	}
 
+	// 单个任务或者分组分组到此返回，下面处理 chord 任务
 	// There is no chord callback, just return
 	if signature.ChordCallback == nil {
 		return nil
 	}
 
 	// Check if all task in the group has completed
+	// 判断分组任务是否完成，完成包括成功或失败
 	groupCompleted, err := worker.server.GetBackend().GroupCompleted(
 		signature.GroupUUID,
 		signature.GroupTaskCount,
@@ -306,6 +343,7 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 	}
 
 	// Trigger chord callback
+	// 判断 ChordTriggered 是否为true,为true表示已经触发过了，直接返回
 	shouldTrigger, err := worker.server.GetBackend().TriggerChord(signature.GroupUUID)
 	if err != nil {
 		return fmt.Errorf("Triggering chord for group %s returned error: %s", signature.GroupUUID, err)
@@ -317,6 +355,20 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 	}
 
 	// Get task states
+	// 通过group 元信息获取task uuid对应的taskstate
+	/*
+		type TaskResult struct {
+			Type  string      `bson:"type"`
+			Value interface{} `bson:"value"`
+		}
+
+		type TaskState struct {
+			TaskUUID  string        `bson:"_id"`
+			State     string        `bson:"state"`
+			Results   []*TaskResult `bson:"results"`
+			Error     string        `bson:"error"`
+		}
+	*/
 	taskStates, err := worker.server.GetBackend().GroupTaskStates(
 		signature.GroupUUID,
 		signature.GroupTaskCount,
@@ -337,6 +389,7 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 			return nil
 		}
 
+		// 把分组任务的结果，加到 ChordCallback.Args 里
 		if signature.ChordCallback.Immutable == false {
 			// Pass results of the task to the chord callback
 			for _, taskResult := range taskState.Results {
@@ -349,6 +402,7 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 	}
 
 	// Send the chord task
+	// 触发 chord task
 	_, err = worker.server.SendTask(signature.ChordCallback)
 	if err != nil {
 		return err
@@ -358,6 +412,7 @@ func (worker *Worker) taskSucceeded(signature *tasks.Signature, taskResults []*t
 }
 
 // taskFailed updates the task state and triggers error callbacks
+// 失败回调
 func (worker *Worker) taskFailed(signature *tasks.Signature, taskErr error) error {
 	// Update task state to FAILURE
 	if err := worker.server.GetBackend().SetStateFailure(signature, taskErr.Error()); err != nil {

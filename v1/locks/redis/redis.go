@@ -80,7 +80,9 @@ func (r Lock) Lock(key string, value int64) error {
 			return err
 		}
 
+		// key过期了
 		if timeout != 0 && now > int64(timeout) {
+			//Getset 命令用于设置指定 key 的值，并返回 key 的旧值。
 			newTimeout, err := r.rclient.GetSet(key, value).Result()
 			if err != nil {
 				return err

@@ -48,7 +48,7 @@ type Backend struct {
 // New creates NullBackend instance
 func New() iface.Backend {
 	return &Backend{
-		Backend: common.NewBackend(new(config.Config)),
+		Backend: common.NewBackend(new(config.Config)), //common 里实现通用基础的backend
 		groups:  make(map[string]struct{}),
 	}
 }

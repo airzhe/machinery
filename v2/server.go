@@ -120,11 +120,13 @@ func (server *Server) SetConfig(cnf *config.Config) {
 }
 
 // SetPreTaskHandler Sets pre publish handler
+// 发布任务前预处理
 func (server *Server) SetPreTaskHandler(handler func(*tasks.Signature)) {
 	server.prePublishHandler = handler
 }
 
 // RegisterTasks registers all tasks at once
+// 使用 sync.Map 注册多个任务
 func (server *Server) RegisterTasks(namedTaskFuncs map[string]interface{}) error {
 	for _, task := range namedTaskFuncs {
 		if err := tasks.ValidateTask(task); err != nil {
@@ -139,6 +141,7 @@ func (server *Server) RegisterTasks(namedTaskFuncs map[string]interface{}) error
 }
 
 // RegisterTask registers a single task
+// 注册单个任务
 func (server *Server) RegisterTask(name string, taskFunc interface{}) error {
 	if err := tasks.ValidateTask(taskFunc); err != nil {
 		return err
@@ -149,12 +152,14 @@ func (server *Server) RegisterTask(name string, taskFunc interface{}) error {
 }
 
 // IsTaskRegistered returns true if the task name is registered with this broker
+// 判断任务是否已经注册
 func (server *Server) IsTaskRegistered(name string) bool {
 	_, ok := server.registeredTasks.Load(name)
 	return ok
 }
 
 // GetRegisteredTask returns registered task by name
+// 获取某一个注册的任务
 func (server *Server) GetRegisteredTask(name string) (interface{}, error) {
 	taskFunc, ok := server.registeredTasks.Load(name)
 	if !ok {
@@ -164,6 +169,7 @@ func (server *Server) GetRegisteredTask(name string) (interface{}, error) {
 }
 
 // SendTaskWithContext will inject the trace context in the signature headers before publishing it
+// 调用 broker 发布任务
 func (server *Server) SendTaskWithContext(ctx context.Context, signature *tasks.Signature) (*result.AsyncResult, error) {
 	span, _ := opentracing.StartSpanFromContext(ctx, "SendTask", tracing.ProducerOption(), tracing.MachineryTag)
 	defer span.Finish()
@@ -214,6 +220,7 @@ func (server *Server) SendChainWithContext(ctx context.Context, chain *tasks.Cha
 }
 
 // SendChain triggers a chain of tasks
+// 发布chain任务
 func (server *Server) SendChain(chain *tasks.Chain) (*result.ChainAsyncResult, error) {
 	_, err := server.SendTask(chain.Tasks[0])
 	if err != nil {
@@ -224,6 +231,7 @@ func (server *Server) SendChain(chain *tasks.Chain) (*result.ChainAsyncResult, e
 }
 
 // SendGroupWithContext will inject the trace context in all the signature headers before publishing it
+// 发布分组任务
 func (server *Server) SendGroupWithContext(ctx context.Context, group *tasks.Group, sendConcurrency int) ([]*result.AsyncResult, error) {
 	span, _ := opentracing.StartSpanFromContext(ctx, "SendGroup", tracing.ProducerOption(), tracing.MachineryTag, tracing.WorkflowGroupTag)
 	defer span.Finish()
@@ -235,6 +243,7 @@ func (server *Server) SendGroupWithContext(ctx context.Context, group *tasks.Gro
 		return nil, errors.New("Result backend required")
 	}
 
+	// 异步结果channel
 	asyncResults := make([]*result.AsyncResult, len(group.Tasks))
 
 	var wg sync.WaitGroup
@@ -246,6 +255,7 @@ func (server *Server) SendGroupWithContext(ctx context.Context, group *tasks.Gro
 
 	// Init the tasks Pending state first
 	for _, signature := range group.Tasks {
+		// 便利设置task状态为pending
 		if err := server.backend.SetStatePending(signature); err != nil {
 			errorsChan <- err
 			continue
@@ -259,6 +269,7 @@ func (server *Server) SendGroupWithContext(ctx context.Context, group *tasks.Gro
 		}
 	}()
 
+	// 发布任务
 	for i, signature := range group.Tasks {
 
 		if sendConcurrency > 0 {
@@ -280,7 +291,14 @@ func (server *Server) SendGroupWithContext(ctx context.Context, group *tasks.Gro
 				errorsChan <- fmt.Errorf("Publish message error: %s", err)
 				return
 			}
-
+			// 获取返回结果
+			/*
+				 &AsyncResult{
+				     	Signature: signature,
+						taskState: new(tasks.TaskState),
+						backend:   backend,
+				}
+			*/
 			asyncResults[index] = result.NewAsyncResult(s, server.backend)
 		}(signature, i)
 	}
@@ -305,6 +323,7 @@ func (server *Server) SendGroup(group *tasks.Group, sendConcurrency int) ([]*res
 }
 
 // SendChordWithContext will inject the trace context in all the signature headers before publishing it
+// 发布 chord 任务
 func (server *Server) SendChordWithContext(ctx context.Context, chord *tasks.Chord, sendConcurrency int) (*result.ChordAsyncResult, error) {
 	span, _ := opentracing.StartSpanFromContext(ctx, "SendChord", tracing.ProducerOption(), tracing.MachineryTag, tracing.WorkflowChordTag)
 	defer span.Finish()
@@ -329,6 +348,7 @@ func (server *Server) SendChord(chord *tasks.Chord, sendConcurrency int) (*resul
 }
 
 // GetRegisteredTaskNames returns slice of registered task names
+// 获取注册的任务名称
 func (server *Server) GetRegisteredTaskNames() []string {
 	taskNames := make([]string, 0)
 
@@ -339,6 +359,7 @@ func (server *Server) GetRegisteredTaskNames() []string {
 	return taskNames
 }
 
+// periodic 周期 定时任务
 // RegisterPeriodicTask register a periodic task which will be triggered periodically
 func (server *Server) RegisterPeriodicTask(spec, name string, signature *tasks.Signature) error {
 	//check spec
@@ -349,6 +370,7 @@ func (server *Server) RegisterPeriodicTask(spec, name string, signature *tasks.S
 
 	f := func() {
 		//get lock
+		// 使用setnx获取锁，重试r.retries次，每次sleep r.interval
 		err := server.lock.LockWithRetries(utils.GetLockName(name, spec), schedule.Next(time.Now()).UnixNano()-1)
 		if err != nil {
 			return

@@ -29,9 +29,9 @@ import (
 type Server struct {
 	config            *config.Config
 	registeredTasks   *sync.Map
-	broker            brokersiface.Broker
-	backend           backendsiface.Backend
-	lock              lockiface.Lock
+	broker            brokersiface.Broker   //接口
+	backend           backendsiface.Backend //接口
+	lock              lockiface.Lock        //定时任务用到
 	scheduler         *cron.Cron
 	prePublishHandler func(*tasks.Signature)
 }
@@ -82,6 +82,8 @@ func NewServer(cnf *config.Config) (*Server, error) {
 }
 
 // NewWorker creates Worker instance
+// 参数consumerTag在AMQP作为Broker时有意义；
+// 参数concurrency用来实现任务并发调度的控制。
 func (server *Server) NewWorker(consumerTag string, concurrency int) *Worker {
 	return &Worker{
 		server:      server,
@@ -139,6 +141,7 @@ func (server *Server) SetPreTaskHandler(handler func(*tasks.Signature)) {
 // RegisterTasks registers all tasks at once
 func (server *Server) RegisterTasks(namedTaskFuncs map[string]interface{}) error {
 	for _, task := range namedTaskFuncs {
+		// 验证任务，必须是函数类型，最后一个参数必须是error类型
 		if err := tasks.ValidateTask(task); err != nil {
 			return err
 		}

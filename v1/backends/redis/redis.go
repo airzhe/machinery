@@ -44,6 +44,7 @@ func New(cnf *config.Config, host, password, socketPath string, db int) iface.Ba
 }
 
 // InitGroup creates and saves a group meta data object
+// 设置 groupUUID 为key， encoded 为value的数据
 func (b *Backend) InitGroup(groupUUID string, taskUUIDs []string) error {
 	groupMeta := &tasks.GroupMeta{
 		GroupUUID: groupUUID,
@@ -69,6 +70,7 @@ func (b *Backend) InitGroup(groupUUID string, taskUUIDs []string) error {
 }
 
 // GroupCompleted returns true if all tasks in a group finished
+// 判断分组任务是否完成1.通过meta获取uuids，2.比较uuid任务成功的状态是否和分组数一致
 func (b *Backend) GroupCompleted(groupUUID string, groupTaskCount int) (bool, error) {
 	conn := b.open()
 	defer conn.Close()
@@ -94,6 +96,7 @@ func (b *Backend) GroupCompleted(groupUUID string, groupTaskCount int) (bool, er
 }
 
 // GroupTaskStates returns states of all tasks in the group
+// 获取分组task任务状态
 func (b *Backend) GroupTaskStates(groupUUID string, groupTaskCount int) ([]*tasks.TaskState, error) {
 	conn := b.open()
 	defer conn.Close()
@@ -110,10 +113,12 @@ func (b *Backend) GroupTaskStates(groupUUID string, groupTaskCount int) ([]*task
 // chord is never trigerred multiple times. Returns a boolean flag to indicate
 // whether the worker should trigger chord (true) or no if it has been triggered
 // already (false)
+// 判断chord是否触发过
 func (b *Backend) TriggerChord(groupUUID string) (bool, error) {
 	conn := b.open()
 	defer conn.Close()
 
+	// 创建redis锁
 	m := b.redsync.NewMutex("TriggerChordMutex")
 	if err := m.Lock(); err != nil {
 		return false, err
@@ -148,6 +153,7 @@ func (b *Backend) TriggerChord(groupUUID string) (bool, error) {
 	return true, nil
 }
 
+// newSate是new出来的新对象，根据从redis查到的信息，设置newState的CreatedAt和TaskName属性
 func (b *Backend) mergeNewTaskState(conn redis.Conn, newState *tasks.TaskState) {
 	state, err := b.getState(conn, newState.TaskUUID)
 	if err == nil {
@@ -157,6 +163,7 @@ func (b *Backend) mergeNewTaskState(conn redis.Conn, newState *tasks.TaskState) 
 }
 
 // SetStatePending updates task state to PENDING
+// 首先获取taskstate，然后执行updateState(conn, taskState)
 func (b *Backend) SetStatePending(signature *tasks.Signature) error {
 	conn := b.open()
 	defer conn.Close()
@@ -223,6 +230,7 @@ func (b *Backend) GetState(taskUUID string) (*tasks.TaskState, error) {
 	return b.getState(conn, taskUUID)
 }
 
+// 获取单个task state 包含状态及result等
 func (b *Backend) getState(conn redis.Conn, taskUUID string) (*tasks.TaskState, error) {
 	item, err := redis.Bytes(conn.Do("GET", taskUUID))
 	if err != nil {
@@ -239,6 +247,7 @@ func (b *Backend) getState(conn redis.Conn, taskUUID string) (*tasks.TaskState, 
 }
 
 // PurgeState deletes stored task state
+// 删除task状态
 func (b *Backend) PurgeState(taskUUID string) error {
 	conn := b.open()
 	defer conn.Close()
@@ -252,6 +261,7 @@ func (b *Backend) PurgeState(taskUUID string) error {
 }
 
 // PurgeGroupMeta deletes stored group meta data
+// 删除分组状态
 func (b *Backend) PurgeGroupMeta(groupUUID string) error {
 	conn := b.open()
 	defer conn.Close()
@@ -292,6 +302,7 @@ func (b *Backend) getStates(conn redis.Conn, taskUUIDs ...string) ([]*tasks.Task
 		taskUUIDInterfaces[i] = interface{}(taskUUID)
 	}
 
+	// 通过可变参数形式执行mget
 	reply, err := redis.Values(conn.Do("MGET", taskUUIDInterfaces...))
 	if err != nil {
 		return taskStates, err
@@ -334,6 +345,7 @@ func (b *Backend) updateState(conn redis.Conn, taskState *tasks.TaskState) error
 }
 
 // getExpiration returns expiration for a stored task state
+// 根据配置获取backend过期时间
 func (b *Backend) getExpiration() time.Duration {
 	expiresIn := b.GetConfig().ResultsExpireIn
 	if expiresIn == 0 {
@@ -345,6 +357,7 @@ func (b *Backend) getExpiration() time.Duration {
 }
 
 // open returns or creates instance of Redis connection
+// 获取redis连接
 func (b *Backend) open() redis.Conn {
 	b.redisOnce.Do(func() {
 		b.pool = b.NewPool(b.socketPath, b.host, b.password, b.db, b.GetConfig().Redis, b.GetConfig().TLSConfig)

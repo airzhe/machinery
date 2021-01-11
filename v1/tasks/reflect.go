@@ -68,20 +68,24 @@ func (e ErrUnsupportedType) Error() string {
 
 // ReflectValue converts interface{} to reflect.Value based on string type
 func ReflectValue(valueType string, value interface{}) (reflect.Value, error) {
+	// 如果参数是切片类型
 	if strings.HasPrefix(valueType, "[]") {
 		return reflectValues(valueType, value)
 	}
 
+	// 非切片类型
 	return reflectValue(valueType, value)
 }
 
 // reflectValue converts interface{} to reflect.Value based on string type
 // representing a base type (not a slice)
+// 通过类型，值创建reflect.Value对象
 func reflectValue(valueType string, value interface{}) (reflect.Value, error) {
 	theType, ok := typesMap[valueType]
 	if !ok {
 		return reflect.Value{}, NewErrUnsupportedType(valueType)
 	}
+	// 通过反射创建类型
 	theValue := reflect.New(theType)
 
 	// Booleans
@@ -102,7 +106,9 @@ func reflectValue(valueType string, value interface{}) (reflect.Value, error) {
 			return reflect.Value{}, err
 		}
 
+		//设置值
 		theValue.Elem().SetInt(intValue)
+		// 返回 theValue 指向的值
 		return theValue.Elem(), err
 	}
 
@@ -134,7 +140,8 @@ func reflectValue(valueType string, value interface{}) (reflect.Value, error) {
 		if err != nil {
 			return reflect.Value{}, err
 		}
-
+		//Elem返回v持有的接口保管的值的Value封装，或者v持有的指针指向的值的Value封装
+		//如果v的Kind不是Interface或Ptr会panic；如果v持有的值为nil，会返回Value零值。
 		theValue.Elem().SetString(stringValue)
 		return theValue.Elem(), nil
 	}
@@ -145,6 +152,7 @@ func reflectValue(valueType string, value interface{}) (reflect.Value, error) {
 // reflectValues converts interface{} to reflect.Value based on string type
 // representing a slice of values
 func reflectValues(valueType string, value interface{}) (reflect.Value, error) {
+	//判断类型是否在 typeMap 中
 	theType, ok := typesMap[valueType]
 	if !ok {
 		return reflect.Value{}, NewErrUnsupportedType(valueType)
@@ -241,8 +249,11 @@ func reflectValues(valueType string, value interface{}) (reflect.Value, error) {
 	if theType.String() == "[]string" {
 		strs := reflect.ValueOf(value)
 
+		// 通过反射创建切片 len返回v持有值的长度，如果v的Kind不是Array、Chan、Slice、Map、String会panic
 		theValue = reflect.MakeSlice(theType, strs.Len(), strs.Len())
+		// Len 返回v持有值的长度，如果v的Kind不是Array、Chan、Slice、Map、String会panic
 		for i := 0; i < strs.Len(); i++ {
+			// getStringValue 传入类型string， Index(i int) Value 返回v持有值的第i个元素。如果v的Kind不是Array、Chan、Slice、String，或者i出界，会panic
 			strValue, err := getStringValue(strings.Split(theType.String(), "[]")[1], strs.Index(i).Interface())
 			if err != nil {
 				return reflect.Value{}, err
@@ -266,6 +277,7 @@ func getBoolValue(theType string, value interface{}) (bool, error) {
 	return b, nil
 }
 
+// 通过类型断言获取 value 值
 func getIntValue(theType string, value interface{}) (int64, error) {
 	// We use https://golang.org/pkg/encoding/json/#Decoder.UseNumber when unmarshaling signatures.
 	// This is because JSON only supports 64-bit floating point numbers and we could lose precision

@@ -94,6 +94,7 @@ func NewRetryTaskState(signature *Signature) *TaskState {
 
 // IsCompleted returns true if state is SUCCESS or FAILURE,
 // i.e. the task has finished processing and either succeeded or failed.
+// 判断任务完成，成功或失败
 func (taskState *TaskState) IsCompleted() bool {
 	return taskState.IsSuccess() || taskState.IsFailure()
 }

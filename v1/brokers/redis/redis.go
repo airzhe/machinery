@@ -22,23 +22,24 @@ import (
 	"github.com/RichardKnop/machinery/v1/tasks"
 )
 
+// 默认延迟队列key
 var redisDelayedTasksKey = "delayed_tasks"
 
 // Broker represents a Redis broker
 type Broker struct {
 	common.Broker
-	common.RedisConnector
-	host         string
-	password     string
-	db           int
-	pool         *redis.Pool
-	consumingWG  sync.WaitGroup // wait group to make sure whole consumption completes
-	processingWG sync.WaitGroup // use wait group to make sure task processing completes
-	delayedWG    sync.WaitGroup
+	common.RedisConnector // 嵌套RedisConnector，后面调用NewPool
+	host                  string
+	password              string
+	db                    int
+	pool                  *redis.Pool
+	consumingWG           sync.WaitGroup // wait group to make sure whole consumption completes
+	processingWG          sync.WaitGroup // use wait group to make sure task processing completes
+	delayedWG             sync.WaitGroup
 	// If set, path to a socket file overrides hostname
 	socketPath string
 	redsync    *redsync.Redsync
-	redisOnce  sync.Once
+	redisOnce  sync.Once // 只执行一次
 }
 
 // New creates new Broker instance
@@ -50,6 +51,7 @@ func New(cnf *config.Config, host, password, socketPath string, db int) iface.Br
 	b.socketPath = socketPath
 
 	if cnf.Redis != nil && cnf.Redis.DelayedTasksKey != "" {
+		// 从配置读取到的延迟队列key
 		redisDelayedTasksKey = cnf.Redis.DelayedTasksKey
 	}
 
@@ -57,14 +59,17 @@ func New(cnf *config.Config, host, password, socketPath string, db int) iface.Br
 }
 
 // StartConsuming enters a loop and waits for incoming messages
+// consumerTag := "machinery_worker"
 func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcessor iface.TaskProcessor) (bool, error) {
 	b.consumingWG.Add(1)
 	defer b.consumingWG.Done()
 
 	if concurrency < 1 {
+		//NumCPU：返回当前系统的 CPU 核数量
 		concurrency = runtime.NumCPU() * 2
 	}
 
+	//调用基础类的StartConsuming方法，初始化 retryFunc 属性
 	b.Broker.StartConsuming(consumerTag, concurrency, taskProcessor)
 
 	conn := b.open()
@@ -73,6 +78,7 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 	// Ping the server to make sure connection is live
 	_, err := conn.Do("PING")
 	if err != nil {
+		//等待多久时间之后，如果 retryStopChan 获得信号，立马返回，后者等待 闭包 fibonacci 方法计算后得到的时间
 		b.GetRetryFunc()(b.GetRetryStopChan())
 
 		// Return err if retry is still true.
@@ -82,6 +88,7 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 		if b.GetRetry() {
 			return b.GetRetry(), err
 		}
+		// 如果重试为false，返回 errors.New("the server has been stopped")
 		return b.GetRetry(), errs.ErrConsumerStopped
 	}
 
@@ -115,10 +122,13 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 				default:
 				}
 
+				//预处理
 				if taskProcessor.PreConsumeHandler() {
+					// 获取下次任务
 					task, _ := b.nextTask(getQueue(b.GetConfig(), taskProcessor))
 					//TODO: should this error be ignored?
 					if len(task) > 0 {
+						// 把任务放到deliveries channel待消费， 此处控制并发
 						deliveries <- task
 					}
 				}
@@ -140,6 +150,7 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 			case <-b.GetStopChan():
 				return
 			default:
+				// 获取下一个该消费的延迟任务，如果出错continue
 				task, err := b.nextDelayedTask(redisDelayedTasksKey)
 				if err != nil {
 					continue
@@ -147,11 +158,12 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 
 				signature := new(tasks.Signature)
 				decoder := json.NewDecoder(bytes.NewReader(task))
+				// UseNumber让解码器将数字解组到interface{}中，而不是float64
 				decoder.UseNumber()
 				if err := decoder.Decode(signature); err != nil {
 					log.ERROR.Print(errs.NewErrCouldNotUnmarshalTaskSignature(task, err))
 				}
-
+				// 发布延迟任务到正常队列待消费
 				if err := b.Publish(context.Background(), signature); err != nil {
 					log.ERROR.Print(err)
 				}
@@ -164,6 +176,7 @@ func (b *Broker) StartConsuming(consumerTag string, concurrency int, taskProcess
 	}
 
 	// Waiting for any tasks being processed to finish
+	// 等待所有队列处理完毕
 	b.processingWG.Wait()
 
 	return b.GetRetry(), nil
@@ -185,6 +198,7 @@ func (b *Broker) StopConsuming() {
 }
 
 // Publish places a new message on the default queue
+// 发布任务到默认队列
 func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error {
 	// Adjust routing key (this decides which queue the message will be published to)
 	b.Broker.AdjustRoutingKey(signature)
@@ -202,6 +216,7 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 	if signature.ETA != nil {
 		now := time.Now().UTC()
 
+		//如果t代表的时间点在u之后，返回真；否则返回假。
 		if signature.ETA.After(now) {
 			score := signature.ETA.UnixNano()
 			_, err = conn.Do("ZADD", redisDelayedTasksKey, score, msg)
@@ -214,6 +229,7 @@ func (b *Broker) Publish(ctx context.Context, signature *tasks.Signature) error 
 }
 
 // GetPendingTasks returns a slice of task signatures waiting in the queue
+// 获取等待消费的任务列表
 func (b *Broker) GetPendingTasks(queue string) ([]*tasks.Signature, error) {
 	conn := b.open()
 	defer conn.Close()
@@ -244,6 +260,7 @@ func (b *Broker) GetPendingTasks(queue string) ([]*tasks.Signature, error) {
 }
 
 // GetDelayedTasks returns a slice of task signatures that are scheduled, but not yet in the queue
+// 获取延迟任务队列列表
 func (b *Broker) GetDelayedTasks() ([]*tasks.Signature, error) {
 	conn := b.open()
 	defer conn.Close()
@@ -272,11 +289,13 @@ func (b *Broker) GetDelayedTasks() ([]*tasks.Signature, error) {
 
 // consume takes delivered messages from the channel and manages a worker pool
 // to process tasks concurrently
+//参数consumerTag在AMQP作为Broker时有意义；参数concurrency用来实现任务并发调度的控制。
 func (b *Broker) consume(deliveries <-chan []byte, concurrency int, taskProcessor iface.TaskProcessor) error {
 	errorsChan := make(chan error, concurrency*2)
 	pool := make(chan struct{}, concurrency)
 
 	// init pool for Worker tasks execution, as many slots as Worker concurrency param
+	// 通过带缓冲的pool控制并发
 	go func() {
 		for i := 0; i < concurrency; i++ {
 			pool <- struct{}{}
@@ -294,7 +313,9 @@ func (b *Broker) consume(deliveries <-chan []byte, concurrency int, taskProcesso
 			if concurrency > 0 {
 				// get execution slot from pool (blocks until one is available)
 				select {
+				//
 				case <-b.GetStopChan():
+					// 如果收到停止信号，消息重新入队
 					b.requeueMessage(d, taskProcessor)
 					continue
 				case <-pool:
@@ -306,6 +327,7 @@ func (b *Broker) consume(deliveries <-chan []byte, concurrency int, taskProcesso
 			// Consume the task inside a goroutine so multiple tasks
 			// can be processed concurrently
 			go func() {
+				//同步执行阻塞
 				if err := b.consumeOne(d, taskProcessor); err != nil {
 					errorsChan <- err
 				}
@@ -314,6 +336,7 @@ func (b *Broker) consume(deliveries <-chan []byte, concurrency int, taskProcesso
 
 				if concurrency > 0 {
 					// give slot back to pool
+					// 执行完成 pool 写入数据
 					pool <- struct{}{}
 				}
 			}()
@@ -322,6 +345,7 @@ func (b *Broker) consume(deliveries <-chan []byte, concurrency int, taskProcesso
 }
 
 // consumeOne processes a single message using TaskProcessor
+// 消费一个任务
 func (b *Broker) consumeOne(delivery []byte, taskProcessor iface.TaskProcessor) error {
 	signature := new(tasks.Signature)
 	decoder := json.NewDecoder(bytes.NewReader(delivery))
@@ -332,6 +356,7 @@ func (b *Broker) consumeOne(delivery []byte, taskProcessor iface.TaskProcessor) 
 
 	// If the task is not registered, we requeue it,
 	// there might be different workers for processing specific tasks
+	// 如果任务名称没有注册过报错返回
 	if !b.IsTaskRegistered(signature.Name) {
 		if signature.IgnoreWhenTaskNotRegistered {
 			return nil
@@ -343,10 +368,12 @@ func (b *Broker) consumeOne(delivery []byte, taskProcessor iface.TaskProcessor) 
 
 	log.DEBUG.Printf("Received new message: %s", delivery)
 
+	// 执行worker的Process方法
 	return taskProcessor.Process(signature)
 }
 
 // nextTask pops next available task from the default queue
+//通过Blpop获取下一个任务
 func (b *Broker) nextTask(queue string) (result []byte, err error) {
 	conn := b.open()
 	defer conn.Close()
@@ -385,6 +412,7 @@ func (b *Broker) nextTask(queue string) (result []byte, err error) {
 
 // nextDelayedTask pops a value from the ZSET key using WATCH/MULTI/EXEC commands.
 // https://github.com/gomodule/redigo/blob/master/redis/zpop_example_test.go
+// 获取有序集合里，值比当前时间大的任务返回，然后删除集合元素
 func (b *Broker) nextDelayedTask(key string) (result []byte, err error) {
 	conn := b.open()
 	defer conn.Close()
@@ -460,6 +488,7 @@ func (b *Broker) nextDelayedTask(key string) (result []byte, err error) {
 }
 
 // open returns or creates instance of Redis connection
+// 从连接池里获取一个连接
 func (b *Broker) open() redis.Conn {
 	b.redisOnce.Do(func() {
 		b.pool = b.NewPool(b.socketPath, b.host, b.password, b.db, b.GetConfig().Redis, b.GetConfig().TLSConfig)
@@ -477,6 +506,7 @@ func getQueue(config *config.Config, taskProcessor iface.TaskProcessor) string {
 	return customQueue
 }
 
+// 重新入队
 func (b *Broker) requeueMessage(delivery []byte, taskProcessor iface.TaskProcessor) {
 	conn := b.open()
 	defer conn.Close()

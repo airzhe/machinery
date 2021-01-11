@@ -6,6 +6,7 @@ import (
 )
 
 // ErrRetryTaskLater ...
+// 多久后重试
 type ErrRetryTaskLater struct {
 	name, msg string
 	retryIn   time.Duration
